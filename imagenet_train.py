@@ -40,6 +40,7 @@ model_names = customized_models_names
 
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+parser.add_argument('-pre', '--pretrained', default=None, type=str, help='pretrained model path')
 parser.add_argument('-d', '--data', default='/raid/D/ssd/imgfile/', type=str)
 parser.add_argument('--train_list', default='./train_img_list.pkl', type=str)
 parser.add_argument('--val_list', default='./val_img_list.pkl', type=str)
@@ -92,8 +93,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
 
-parser.add_argument('--pretrained', default='', type=str,
-                    help='path to moco pretrained checkpoint')
+# parser.add_argument('--pretrained', default='', type=str,
+#                     help='path to moco pretrained checkpoint')
 
 best_acc1 = 0
 best_acc5 = 0
@@ -178,9 +179,32 @@ def main_worker(gpu, ngpus_per_node, args):
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
     # create model
-    print("=> creating model '{}'".format(args.arch))
-    model = models.__dict__[args.arch]()
-    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    if args.pretrained:
+        print("=> using pre-trained model '{}'".format(args.arch))
+        model = models.__dict__[args.arch](num_classes=1000)  # Temporarily assume original num_classes
+        saved_model = torch.load(args.pretrained)
+
+        # Modify the classifier of the saved model before loading it
+        saved_model['classifier.weight'] = saved_model['classifier.weight'][:1, :]  # Adjust weights
+        saved_model['classifier.bias'] = saved_model['classifier.bias'][:1]  # Adjust bias
+
+        # Now update your model to have the correct classifier for your task
+        model.classifier = nn.Linear(2048, 1)
+        model.load_state_dict(saved_model, strict=False)
+
+        # Freeze pretrained layers
+        for param in model.parameters():
+            param.requires_grad = False
+        
+        # Unfreeze the head back, so that we can finetune
+        for param in model.classifier.parameters():
+            param.requires_grad = True
+        
+        print('=> model.classifier is unfrozen')
+    else:
+        print("=> creating model '{}'".format(args.arch))
+        model = models.__dict__[args.arch]()
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
@@ -345,7 +369,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         data_time.update(time.time() - end)
        
         if 'sk' in args.arch:
-          images, target = mixup(images, target, 0.2, 1000)
+          images, target = mixup(images, target, 0.2, 1)
 
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
